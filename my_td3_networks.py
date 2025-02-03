@@ -39,6 +39,10 @@ class ReplayBuffer:
             d.append(np.array(d0, copy=False))
 
         return np.array(x), np.array(y), np.array(u), np.array(r).reshape(-1, 1), np.array(d).reshape(-1, 1)
+    
+    def clear(self):
+        self.storage.clear()
+        self.ptr = 0
 
 
 class Actor(nn.Module):
@@ -46,15 +50,25 @@ class Actor(nn.Module):
         super(Actor, self).__init__()
 
         self.fc1 = nn.Linear(state_dim, 400)
+        self.bn1 = nn.BatchNorm1d(400)
+
         self.fc2 = nn.Linear(400, 300)
+        self.bn2 = nn.BatchNorm1d(300)
+
         self.fc3 = nn.Linear(300, action_dim)
+        self.bn3 = nn.BatchNorm1d(action_dim)
 
         self.max_action = max_action
 
     def forward(self, state):
-        a = func.relu(self.fc1(state))
-        a = func.relu(self.fc2(a))
-        a = torch.tanh(self.fc3(a)) * self.max_action
+        if state.size(0) > 1:
+            a = func.relu(self.bn1(self.fc1(state)))
+            a = func.relu(self.bn2(self.fc2(a)))
+            a = func.softsign(self.bn3(self.fc3(a))) * self.max_action
+        else:
+            a = func.relu(self.fc1(state))
+            a = func.relu(self.fc2(a))
+            a = func.softsign(self.fc3(a)) * self.max_action
         return a
 
 
@@ -63,14 +77,23 @@ class Critic(nn.Module):
         super(Critic, self).__init__()
 
         self.fc1 = nn.Linear(state_dim + action_dim, 400)
-        self.fc2 = nn.Linear(400, 300)
-        self.fc3 = nn.Linear(300, 1)
+        self.bn1 = nn.BatchNorm1d(400)
 
+        self.fc2 = nn.Linear(400, 300)
+        self.bn2 = nn.BatchNorm1d(300)
+
+        self.fc3 = nn.Linear(300, 1)
+    
     def forward(self, state, action):
         state_action = torch.cat([state, action], 1)
 
-        q = func.relu(self.fc1(state_action))
-        q = func.relu(self.fc2(q))
+        if state_action.size(0) > 1:
+            q = func.relu(self.bn1(self.fc1(state_action)))
+            q = func.relu(self.bn2(self.fc2(q)))
+        else:
+            q = func.relu(self.fc1(q))
+            q = func.relu(self.fc2(q))
+
         q = self.fc3(q)
         return q
 
@@ -122,7 +145,7 @@ class TD3:
             # Select next action according to target policy:
             noise = torch.ones_like(action).data.normal_(0, self.args.policy_noise).to(self.device)
             noise = noise.clamp(-self.args.noise_clip, self.args.noise_clip)
-            next_action = (self.actor_target(next_state) + noise)
+            next_action = self.actor_target(next_state) + noise
             next_action = next_action.clamp(-self.max_action, self.max_action)
 
             # Compute target Q-value:
@@ -149,7 +172,7 @@ class TD3:
             # Delayed policy updates:
             if i % self.args.policy_delay == 0:
                 # Compute actor loss:
-                actor_loss = - self.critic_1(state, self.actor(state)).mean()
+                actor_loss = -self.critic_1(state, self.actor(state)).mean()
 
                 # Optimize the actor
                 self.actor_optimizer.zero_grad()
