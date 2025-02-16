@@ -11,7 +11,7 @@ env_name = "PinchingAntenna-v1"  # gym environment
 mode = 'train'  # mode = 'train' or 'test' or 'plot'
 gamma = 0.7  # discounted factor
 tau = 0.005  # target smoothing coefficient
-learning_rate = 2e-5
+learning_rate = 1e-5
 capacity = 1000  # replay buffer size
 max_episode = 300
 num_iteration = 300

@@ -47,11 +47,14 @@ class Actor(nn.Module):
         self.l1 = nn.Linear(state_dim, 400)
         self.bn1 = nn.BatchNorm1d(400)
 
-        self.l2 = nn.Linear(400, 300)
-        self.bn2 = nn.BatchNorm1d(300)
+        self.l2 = nn.Linear(400, 600)
+        self.bn2 = nn.BatchNorm1d(600)
 
-        self.l3 = nn.Linear(300, action_dim)
-        self.bn3 = nn.BatchNorm1d(action_dim)
+        self.l3 = nn.Linear(600, 300)
+        self.bn3 = nn.BatchNorm1d(300)
+
+        self.l4 = nn.Linear(300, action_dim)
+        self.bn4 = nn.BatchNorm1d(action_dim)
 
         self.max_action = max_action
 
@@ -59,11 +62,13 @@ class Actor(nn.Module):
         if state.size(0) > 1:
             a = torch.relu(self.bn1(self.l1(state)))
             a = torch.relu(self.bn2(self.l2(a)))
-            a = torch.tanh(self.bn3(self.l3(a))) * self.max_action
+            a = torch.relu(self.bn3(self.l3(a)))
+            a = torch.tanh(self.bn4(self.l4(a))) * self.max_action
         else:
             a = torch.relu(self.l1(state))
             a = torch.relu(self.l2(a))
-            a = torch.tanh(self.l3(a)) * self.max_action
+            a = torch.relu(self.l3(a))
+            a = torch.tanh(self.l4(a)) * self.max_action
 
         return a
     
@@ -75,22 +80,27 @@ class Critic(nn.Module):
         self.l1 = nn.Linear(state_dim + action_dim, 400)
         self.bn1 = nn.BatchNorm1d(400)
 
-        self.l2 = nn.Linear(400, 300)
-        self.bn2 = nn.BatchNorm1d(300)
+        self.l2 = nn.Linear(400, 600)
+        self.bn2 = nn.BatchNorm1d(600)
 
-        self.l3 = nn.Linear(300, 1)
+        self.l3 = nn.Linear(600, 300)
+        self.bn3 = nn.BatchNorm1d(300)
+
+        self.l4 = nn.Linear(300, 1)
 
     def forward(self, state, action):
         if state.size(0) > 1:
             sa = torch.cat([state, action], 1)
             q = torch.relu(self.bn1(self.l1(sa)))
             q = torch.relu(self.bn2(self.l2(q)))
-            q = self.l3(q)
+            q = torch.relu(self.bn3(self.l3(q)))
+            q = self.l4(q)
         else:
             sa = torch.cat([state, action], 1)
             q = torch.relu(self.l1(sa))
             q = torch.relu(self.l2(q))
-            q = self.l3(q)
+            q = torch.relu(self.l3(q))
+            q = self.l4(q)
             
         return q
 
