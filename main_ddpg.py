@@ -13,7 +13,7 @@ gamma = 0.7  # discounted factor
 tau = 0.005  # target smoothing coefficient
 learning_rate = 1e-5
 capacity = 1000  # replay buffer size
-max_episode = 300
+max_episode = 10000
 num_iteration = 300
 warmup = 50  # time without training but only filling the replay memory
 batch_size =5  # mini batch size
@@ -29,10 +29,11 @@ env = gym.make(id=env_name, num_waveguides=num_waveguides, num_users=num_users)
 if isinstance(env.observation_space, gym.spaces.Dict):
     env = FlattenObservation(env)
 
-state_dim = env.observation_space.shape[0]
+channel_dim = 2 * num_waveguides * num_users
+feature_dim = location_dim = num_waveguides
 action_dim = env.action_space.shape[0]
 
-agent = DDPG(state_dim, action_dim, max_action, capacity, device)
+agent = DDPG(channel_dim, feature_dim, location_dim, action_dim, max_action, capacity, device=device)
 if mode == 'test':
     agent.load(path)
     for episode in range(max_episode):
@@ -62,22 +63,33 @@ elif mode == 'train':
         agent.reset()
 
         for step in range(num_iteration):
+            channel = state[:2 * num_waveguides * num_users].reshape(1, -1)
+            location = state[2 * num_waveguides * num_users:].reshape(1, -1)
+            feature = agent.abstractor(torch.FloatTensor(channel).to(device))
+            feature = feature.cpu().data.numpy().flatten()
+
             if episode == 0 and step <= warmup:
                 action = env.action_space.sample()
             else:
-                action = agent.select_action(state)
+                action = agent.select_action(channel, location)
 
             next_state, reward, done, _, _ = env.step(action)
             episode_reward += reward
 
-            agent.replay_buffer.add(state, action, next_state, reward, done)
+            next_channel = next_state[:2 * num_waveguides * num_users].reshape(1, -1)
+            next_location = next_state[2 * num_waveguides * num_users:].reshape(1, -1)
+            next_feature = agent.abstractor(torch.FloatTensor(next_channel).to(device))
+            next_feature = next_feature.cpu().data.numpy().flatten()
+            agent.replay_buffer.add(channel, location, feature, next_channel, next_location, next_feature, action, reward, done)
             state = next_state
 
+            critic_loss, actor_loss = 0, 0
             if episode > 0 or step > warmup:
-                agent.train(batch_size, gamma, tau, lr=learning_rate)
+                critic_loss, actor_loss = agent.train(batch_size, gamma, tau, lr=learning_rate)
 
             if step % 20 == 0:
-                print("Episode: {}, Step: {}, Total Reward: {}".format(episode, step, episode_reward))
+                # print("Episode: {}, Step: {}, Total Reward: {}".format(episode, step, episode_reward))
+                print("Episode: {}, Step: {}, Critic Loss = {}, Actor Loss = {}".format(episode, step, critic_loss, actor_loss))
 
             if done:
                 break

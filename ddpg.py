@@ -7,23 +7,38 @@ from torch.optim import Adam
 from random_process import OrnsteinUhlenbeckProcess
 
 class ReplayBuffer:
-    def __init__(self, state_dim, action_dim, max_size=500):
+    def __init__(self, channel_dim, location_dim, feature_dim, action_dim, max_size=500):
         self.max_size = max_size
         self.ptr = 0
         self.size = 0
 
-        self.state = np.zeros((max_size, state_dim))
-        self.action = np.zeros((max_size, action_dim))
-        self.next_state = np.zeros((max_size, state_dim))
-        self.reward = np.zeros((max_size, 1))
-        self.not_done = np.zeros((max_size, 1))
+        self.channel = np.zeros((max_size, channel_dim))
+        self.location = np.zeros((max_size, location_dim))
+        self.feature = np.zeros((max_size, feature_dim))
+        self.next_channel = np.zeros((max_size, channel_dim))
+        self.next_location = np.zeros((max_size, location_dim))
+        self.next_feature = np.zeros((max_size, feature_dim))
 
-    def add(self, state, action, next_state, reward, done):
-        self.state[self.ptr] = state
+        self.action = np.zeros((max_size, action_dim))
+        self.reward = np.zeros((max_size, 1))
+        self.done = np.zeros((max_size, 1))
+
+    def add(self, channel, location, feature, next_channel, next_location, next_feature, action, reward, done):
+        self.channel[self.ptr] = channel
+        self.location[self.ptr] = location
+        self.feature[self.ptr] = feature
+        self.next_channel[self.ptr] = next_channel
+        self.next_location[self.ptr] = next_location
+        self.next_feature[self.ptr] = next_feature
         self.action[self.ptr] = action
-        self.next_state[self.ptr] = next_state
         self.reward[self.ptr] = reward
-        self.not_done[self.ptr] = 1. - done
+        self.done[self.ptr] = done
+
+        # self.state[self.ptr] = state
+        # self.action[self.ptr] = action
+        # self.next_state[self.ptr] = next_state
+        # self.reward[self.ptr] = reward
+        # self.done[self.ptr] = done
 
         self.ptr = (self.ptr + 1) % self.max_size
         self.size = min(self.size + 1, self.max_size)
@@ -32,13 +47,41 @@ class ReplayBuffer:
         idx = np.random.randint(0, self.size, size=batch_size)
 
         return (
-            self.state[idx],
+            self.channel[idx],
+            self.location[idx],
+            self.feature[idx],
+            self.next_channel[idx],
+            self.next_location[idx],
+            self.next_feature[idx],
             self.action[idx],
-            self.next_state[idx],
             self.reward[idx],
-            self.not_done[idx]
+            self.done[idx]
         )
 
+class Abstractor(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super(Abstractor, self).__init__()
+
+        self.l1 = nn.Linear(input_dim, 300)
+        self.bn1 = nn.BatchNorm1d(300)
+
+        self.l2 = nn.Linear(300, 400)
+        self.bn2 = nn.BatchNorm1d(400)
+
+        self.l3 = nn.Linear(400, output_dim)
+        self.bn3 = nn.BatchNorm1d(output_dim)
+
+    def forward(self, channel):
+        if channel.size(0) > 1:
+            a = torch.relu(self.bn1(self.l1(channel)))
+            a = torch.relu(self.bn2(self.l2(a)))
+            a = torch.sigmoid(self.bn3(self.l3(a)))
+        else:
+            a = torch.relu(self.l1(channel))
+            a = torch.relu(self.l2(a))
+            a = torch.sigmoid(self.l3(a))
+
+        return a
 
 class Actor(nn.Module):
     def __init__(self, state_dim, action_dim, max_action):
@@ -106,7 +149,10 @@ class Critic(nn.Module):
 
 
 class DDPG:
-    def __init__(self, state_dim, action_dim, max_action, capacity, device="cpu"):
+    def __init__(self, channel_dim, feature_dim, location_dim, action_dim, max_action, capacity, device="cpu"):
+        self.abstractor = Abstractor(channel_dim, feature_dim).to(device)
+
+        state_dim = feature_dim + location_dim
         self.actor = Actor(state_dim, action_dim, max_action).to(device)
         self.actor_target = Actor(state_dim, action_dim, max_action).to(device)
         self.actor_target.load_state_dict(self.actor.state_dict())
@@ -115,31 +161,38 @@ class DDPG:
         self.critic_target = Critic(state_dim, action_dim).to(device)
         self.critic_target.load_state_dict(self.critic.state_dict())
 
-        self.state_dim = state_dim
+        self.channel_dim = channel_dim
         self.action_dim = action_dim
-        self.replay_buffer = ReplayBuffer(state_dim, action_dim, max_size=capacity)
+        self.replay_buffer = ReplayBuffer(channel_dim, location_dim, feature_dim, action_dim, max_size=capacity)
         self.max_action = max_action
         self.device = device
         self.random_process = OrnsteinUhlenbeckProcess(size=action_dim, theta=0.15, mu=0, sigma=0.2)
 
-    def select_action(self, state):
-        state = torch.FloatTensor(state.reshape(1, -1)).to(self.device)
-        # action = self.actor(state).cpu().data.numpy().flatten() + self.random_process.sample()
+    def select_action(self, channel, location):
+        channel = torch.FloatTensor(channel).to(self.device)
+        location = torch.FloatTensor(location).to(self.device)
+        feature = self.abstractor(channel)
+        state = torch.cat([feature, location], 1)
         action = self.actor(state).cpu().data.numpy().flatten()
-        return action.clip(-self.max_action, self.max_action)
+        return action
 
-    def train(self, batch_size=100, discount=0.99, tau=0.005, lr=1e-5):
-        state, action, next_state, reward, not_done = self.replay_buffer.sample(batch_size)
+    def train(self, batch_size=100, gamma=0.99, tau=0.005, lr=1e-5):
+        channel, location, feature, next_channel, next_location, next_feature, action, reward, done = self.replay_buffer.sample(batch_size)
 
-        state = torch.FloatTensor(state).to(self.device)
+        channel = torch.FloatTensor(channel).to(self.device)
+        location = torch.FloatTensor(location).to(self.device)
+        feature = torch.FloatTensor(feature).to(self.device)
+        next_channel = torch.FloatTensor(next_channel).to(self.device)
+        next_location = torch.FloatTensor(next_location).to(self.device)
+        next_feature = torch.FloatTensor(next_feature).to(self.device)
         action = torch.FloatTensor(action).to(self.device)
-        next_state = torch.FloatTensor(next_state).to(self.device)
         reward = torch.FloatTensor(reward).to(self.device)
-        not_done = torch.FloatTensor(not_done).to(self.device)
+        done = torch.FloatTensor(done).to(self.device)
 
-        next_action = self.actor_target(next_state)
-        target_Q = reward + (not_done * discount * self.critic_target(next_state, next_action)).detach()
-        current_Q = self.critic(state, action)
+        current_Q = self.critic(torch.cat([feature, location], 1), action)
+        next_action = self.actor_target(torch.cat([next_feature, next_location], 1))
+        next_Q = self.critic_target(torch.cat([next_feature, next_location], 1), next_action).detach()
+        target_Q = reward + (1 - done) * gamma * next_Q
 
         critic_optimizer = Adam(self.critic.parameters(), lr=lr)
         critic_optimizer.zero_grad()
@@ -151,17 +204,28 @@ class DDPG:
         actor_optimizer = Adam(self.actor.parameters(), lr=lr)
         actor_optimizer.zero_grad()
 
+        state = torch.cat([self.abstractor(channel), location], 1)
         actor_loss = -self.critic(state, self.actor(state)).mean()
-        actor_loss.backward()
+        actor_loss.backward(retain_graph=True)
         actor_optimizer.step()
+
+        abstractor_optimizer = Adam(self.abstractor.parameters(), lr=lr)
+        abstractor_optimizer.zero_grad()
+
+        abstractor_loss = -self.critic(state, self.actor(state)).mean()
+        abstractor_loss.backward()
+        abstractor_optimizer.step()
 
         for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
             target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
         for param, target_param in zip(self.actor.parameters(), self.actor_target.parameters()):
             target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
+
+        return critic_loss.item(), actor_loss.item()
     
     def save(self, filename):
+        torch.save(self.abstractor.state_dict(), filename + "abstractor.pth")
         torch.save(self.actor.state_dict(), filename + "actor.pth")
         torch.save(self.critic.state_dict(), filename + "critic.pth")
         
